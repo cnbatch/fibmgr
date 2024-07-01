@@ -13,3 +13,5 @@ Examples:
 	fibmgr reset 1 2 3
 	fibmgr reset 1,2 3
 ```
+
+Note: This tool can only works on FreeBSD version ≥ 14.2
