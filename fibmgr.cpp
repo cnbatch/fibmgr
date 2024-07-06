@@ -1,7 +1,11 @@
+#include <algorithm>
 #include <cstdio>
 #include <iostream>
 #include <vector>
 #include <sstream>
+#include <charconv>
+#include <tuple>
+#include <map>
 
 #include <arpa/inet.h>
 #include <net/if.h>
@@ -26,9 +30,12 @@
 
 // from /usr.bin/netstat/common.h
 struct ifmap_entry {
-	char ifname[IFNAMSIZ];
+	std::string ifname;
 	uint32_t mtu;
+	uint32_t index;
 };
+
+std::map<uint32_t, ifmap_entry> ifmap;
 
 struct routing_entry
 {
@@ -37,11 +44,30 @@ struct routing_entry
 	uint8_t mask;
 	int flags;
 	uint32_t mtu;
-	uint32_t weight = 1;
+	uint32_t weight;
+};
+
+struct add_later_entry
+{
+	routing_entry rtenty;
+	int fib;
 };
 
 routing_entry default_entries[6] = {};
-int sdl_index = 0;
+std::vector<add_later_entry> entries_add_later;
+int lo0_index = 0;
+
+// first: valid, second: invalid
+std::tuple<std::set<int>, std::vector<std::string>, bool>
+find_fibnum(const std::string &str, int fib_total);
+
+std::vector<int> all_fibs(int fib_total);
+
+std::string sockaddr_to_string(sockaddr_in *addr);
+std::string sockaddr_to_string(sockaddr_in6 *addr);
+std::string sockaddr_to_string(sockaddr_storage *addr);
+std::string sockaddr_to_string(sockaddr *addr);
+void copy_sockaddr(void *src, void *dst);
 
 // orginally from /sbin/route/route_netlink.c: nl_init_socket
 bool
@@ -66,20 +92,22 @@ nl_init_socket(struct snl_state *ss)
 }
 
 void add_defaults(int fibnum);
+void try_add_again();
+bool dependency_checker(add_later_entry &second_entry, add_later_entry &first_entry);
+void nl_ops(int cmd, int fib, snl_parsed_route &rt);
 
 // orginally from /usr.bin/netstat/route_netlink.c: p_rtable_netlink
 bool
 routing_table_netlink_ops(int fibnum, int af, action_t action, const std::vector<int> &other_fibs = {});
 
 // orginally from /usr.bin/netstat/route_netlink.c: prepare_ifmap_netlink
-struct ifmap_entry *
-prepare_ifmap_netlink(struct snl_state *ss, size_t *pifmap_size);
+std::map<uint32_t, ifmap_entry>
+prepare_ifmap_netlink(struct snl_state *ss);
 
 // orginally from /usr.bin/netstat/route_netlink.c: p_rtentry_netlink
 void
 routing_table_entry_netlink_ops(int cmd, const std::vector<int> &other_fib,
-                                struct snl_state *ss, ifmap_entry *ifmap,
-                                struct nlmsghdr *hdr);
+                                struct snl_state *ss, struct nlmsghdr *hdr);
 
 // orginally from /sbin/route/route_netlink.c: rtmsg_nl
 int
@@ -255,14 +283,12 @@ rtmsg_nl(int cmd, int rtm_flags, int fib,
 
 void
 routing_table_entry_netlink_ops(int cmd, const std::vector<int> &fibnums,
-                                struct snl_state *ss, ifmap_entry *ifmap, struct nlmsghdr *hdr)
+                                struct snl_state *ss, struct nlmsghdr *hdr)
 {
-
+	std::string current_route;
 	struct snl_parsed_route rt = {};
 	if (!snl_parse_nlmsg(ss, hdr, &snl_rtm_route_parser, &rt))
 		return;
-	if (rt.rtax_weight == 0)
-		rt.rtax_weight = 1;
 
 	if (rt.rta_multipath.num_nhops != 0) {
 		uint32_t orig_rtflags = rt.rta_rtflags;
@@ -276,34 +302,9 @@ routing_table_entry_netlink_ops(int cmd, const std::vector<int> &fibnums,
 			rt.rta_rtflags = nhop->rta_rtflags ? nhop->rta_rtflags : orig_rtflags;
 			rt.rtax_mtu = nhop->rtax_mtu ? nhop->rtax_mtu : orig_mtu;
 
-			if (rt.rtm_family == AF_INET)
-			{
-				sockaddr_in* destination_addr_in = reinterpret_cast<sockaddr_in*>(rt.rta_dst);
-				char buf[32] = {};
-				inet_ntop(AF_INET, &destination_addr_in->sin_addr, buf, destination_addr_in->sin_len);
-				if (std::string("127.0.0.1") == buf)
-					sdl_index = ((sockaddr_dl*)rt.rta_gw)->sdl_index;
-			}
-
-			if (rt.rtm_family == AF_INET6)
-			{
-				sockaddr_in6* destination_addr_in = reinterpret_cast<sockaddr_in6*>(rt.rta_dst);
-				char buf[128] = {};
-				inet_ntop(AF_INET6, &destination_addr_in->sin6_addr, buf, destination_addr_in->sin6_len);
-				if (std::string("::1") == buf)
-					sdl_index = ((sockaddr_dl*)rt.rta_gw)->sdl_index;
-			}
-
 			for (auto fib : fibnums)
 			{
-				int error = rtmsg_nl(cmd, rt.rta_rtflags, fib, rt.rta_dst, rt.rtm_dst_len, rt.rta_gw, rt.rtax_mtu, rt.rtax_weight);
-				if (error != 0)
-				{
-					if (cmd == RTSOCK_RTM_ADD)
-						std::cerr << std::format("Add route to fib {} failed.\n", fib);
-					if (cmd == RTSOCK_RTM_DELETE)
-						std::cerr << std::format("Delete route of fib {} failed.\n", fib);
-				}
+				nl_ops(cmd, fib, rt);
 			}
 		}
 		return;
@@ -317,39 +318,14 @@ routing_table_entry_netlink_ops(int cmd, const std::vector<int> &fibnums,
 	if (rt.rta_gw == NULL)
 		rt.rta_gw = (struct sockaddr *)&sdl_gw;
 
-	if (rt.rtm_family == AF_INET)
-	{
-		sockaddr_in* destination_addr_in = reinterpret_cast<sockaddr_in*>(rt.rta_dst);
-		char buf[32] = {};
-		inet_ntop(AF_INET, &destination_addr_in->sin_addr, buf, destination_addr_in->sin_len);
-		if (std::string("127.0.0.1") == buf)
-			sdl_index = ((sockaddr_dl*)rt.rta_gw)->sdl_index;
-	}
-
-	if (rt.rtm_family == AF_INET6)
-	{
-		sockaddr_in6* destination_addr_in = reinterpret_cast<sockaddr_in6*>(rt.rta_dst);
-		char buf[128] = {};
-		inet_ntop(AF_INET6, &destination_addr_in->sin6_addr, buf, destination_addr_in->sin6_len);
-		if (std::string("::1") == buf)
-			sdl_index = ((sockaddr_dl*)rt.rta_gw)->sdl_index;
-	}
-
 	for (auto fib : fibnums)
 	{
-		int error = rtmsg_nl(cmd, rt.rta_rtflags, fib, rt.rta_dst, rt.rtm_dst_len, rt.rta_gw, rt.rtax_mtu, rt.rtax_weight);
-		if (error != 0)
-		{
-			if (cmd == RTSOCK_RTM_ADD)
-				std::cerr << std::format("Add route to fib {} failed.\n", fib);
-			if (cmd == RTSOCK_RTM_DELETE)
-				std::cerr << std::format("Delete route of fib {} failed.\n", fib);
-		}
+		nl_ops(cmd, fib, rt);
 	}
 }
 
-struct ifmap_entry *
-prepare_ifmap_netlink(struct snl_state *ss, size_t *pifmap_size)
+std::map<uint32_t, ifmap_entry>
+prepare_ifmap_netlink(struct snl_state *ss)
 {
 	struct {
 		struct nlmsghdr hdr;
@@ -364,10 +340,8 @@ prepare_ifmap_netlink(struct snl_state *ss, size_t *pifmap_size)
 	msg.hdr.nlmsg_len = sizeof(msg);
 
 	if (!snl_send_message(ss, &msg.hdr))
-		return (NULL);
+		return {};
 
-	struct ifmap_entry *ifmap = NULL;
-	uint32_t ifmap_size = 0;
 	struct nlmsghdr *hdr;
 	struct snl_errmsg_data e = {};
 
@@ -376,21 +350,20 @@ prepare_ifmap_netlink(struct snl_state *ss, size_t *pifmap_size)
 
 		if (!snl_parse_nlmsg(ss, hdr, &snl_rtm_link_parser_simple, &link))
 			continue;
-		if (link.ifi_index >= ifmap_size) {
-			size_t size = roundup2(link.ifi_index + 1, 32) * sizeof(struct ifmap_entry);
-			if ((ifmap = (decltype(ifmap))realloc(ifmap, size)) == NULL)
-				std::cerr << std::format("realloc({}) failed\n", size);
-			memset(&ifmap[ifmap_size], 0,
-				size - ifmap_size *
-				sizeof(struct ifmap_entry));
-			ifmap_size = roundup2(link.ifi_index + 1, 32);
-		}
-		if (*ifmap[link.ifi_index].ifname != '\0')
-			continue;
-		strlcpy(ifmap[link.ifi_index].ifname, link.ifla_ifname, IFNAMSIZ);
-		ifmap[link.ifi_index].mtu = link.ifla_mtu;
+
+		ifmap_entry link_entry =
+		{
+			.ifname = link.ifla_ifname,
+			.mtu = link.ifla_mtu,
+			.index = link.ifi_index
+		};
+
+		if (link_entry.ifname == "lo0")
+			lo0_index = link.ifi_index;
+
+		ifmap[link.ifi_index] = std::move(link_entry);
 	}
-	*pifmap_size = ifmap_size;
+
 	return (ifmap);
 }
 
@@ -401,17 +374,9 @@ routing_table_netlink_ops(int fibnum, int af, action_t action, const std::vector
 	struct nlmsghdr *hdr;
 	struct snl_errmsg_data e = {};
 	struct snl_state ss = {};
-	struct ifmap_entry *ifmap;
-	size_t ifmap_size;
 
 	if (!snl_init(&ss, NETLINK_ROUTE))
 		return (false);
-
-	ifmap = prepare_ifmap_netlink(&ss, &ifmap_size);
-	if (ifmap == NULL) {
-		snl_free(&ss);
-		return (false);
-	}
 
 	struct
 	{
@@ -448,13 +413,13 @@ routing_table_netlink_ops(int fibnum, int af, action_t action, const std::vector
 
 		if (action == action_t::copy)
 		{
-			routing_table_entry_netlink_ops(RTSOCK_RTM_ADD, other_fibs, &ss, ifmap, hdr);
+			routing_table_entry_netlink_ops(RTSOCK_RTM_ADD, other_fibs, &ss, hdr);
 		}
 
 		if (action == action_t::remove)
 		{
 			std::vector<int> target_fib = { fibnum };
-			routing_table_entry_netlink_ops(RTSOCK_RTM_DELETE, target_fib, &ss, ifmap, hdr);
+			routing_table_entry_netlink_ops(RTSOCK_RTM_DELETE, target_fib, &ss, hdr);
 		}
 		snl_clear_lb(&ss);
 	}
@@ -466,18 +431,115 @@ void add_defaults(int fib)
 {
 	for (int i = 0; i < 6; i++)
 	{
-		default_entries[i].gateway.sdl_index = sdl_index;
+		default_entries[i].gateway.sdl_index = lo0_index;
 		int error = rtmsg_nl(RTSOCK_RTM_ADD, default_entries[i].flags, fib, (sockaddr*)&default_entries[i].destination,
 			default_entries[i].mask, (sockaddr*)&default_entries[i].gateway, default_entries[i].mtu, default_entries[i].weight);
 		if (error != 0)
-			std::cerr << std::format("Add route to fib {} failed.\n", fib);
+			std::cerr << std::format("Add route to fib {} failed: {}\n", fib, strerror(error));
 	}
 }
 
-void init_entries()
+void try_add_again()
+{
+	std::sort(entries_add_later.begin(), entries_add_later.end(),
+		[](add_later_entry &second_entry, add_later_entry &first_entry) { return second_entry.fib < first_entry.fib; });
+
+	std::sort(entries_add_later.begin(), entries_add_later.end(),
+		[](add_later_entry &second_entry, add_later_entry &first_entry) { return dependency_checker(second_entry, first_entry); });
+
+	for (size_t i = 0; i < entries_add_later.size(); i++)
+	{
+		entries_add_later[i].rtenty.gateway.sdl_index = lo0_index;
+		int error = rtmsg_nl(RTSOCK_RTM_ADD, entries_add_later[i].rtenty.flags, entries_add_later[i].fib, (sockaddr*)&entries_add_later[i].rtenty.destination,
+			entries_add_later[i].rtenty.mask, (sockaddr*)&entries_add_later[i].rtenty.gateway, entries_add_later[i].rtenty.mtu, entries_add_later[i].rtenty.weight);
+		if (error != 0)
+			std::cerr << std::format("Add route {}/{} to fib {} failed: {}\n",
+				sockaddr_to_string(&entries_add_later[i].rtenty.destination), entries_add_later[i].rtenty.mask, entries_add_later[i].fib, strerror(error));
+	}
+}
+
+bool dependency_checker(add_later_entry &second_entry, add_later_entry &first_entry)
+{
+	if (second_entry.fib != first_entry.fib)
+		return false;
+
+	if (second_entry.rtenty.destination.ss_family != first_entry.rtenty.gateway.sdl_family)
+		return false;
+
+	if (!(first_entry.rtenty.flags & RTF_GATEWAY))
+		return false;
+
+	if (second_entry.rtenty.destination.ss_family == AF_INET)
+	{
+		sockaddr_in *first_address_v4 = (sockaddr_in *)&first_entry.rtenty.gateway;
+		sockaddr_in *second_address_v4 = (sockaddr_in *)&second_entry.rtenty.destination;
+
+		uint32_t mask = (second_entry.rtenty.mask == 0) ? 0 : (~0 << (32 - second_entry.rtenty.mask)) & 0xFFFFFFFF;
+		mask = htonl(mask);
+		sockaddr_in netmask = {};
+		std::copy_n((unsigned char *)&mask, sizeof(mask), (unsigned char *)&(netmask.sin_addr));
+		return (second_address_v4->sin_addr.s_addr & netmask.sin_addr.s_addr & first_address_v4->sin_addr.s_addr);
+	}
+
+	if (second_entry.rtenty.destination.ss_family == AF_INET6)
+	{
+		sockaddr_in6 *first_address_v6 = (sockaddr_in6 *)&first_entry.rtenty.gateway;
+		sockaddr_in6 *second_address_v6 = (sockaddr_in6 *)&second_entry.rtenty.destination;
+
+		int prefix_bytes = second_entry.rtenty.mask / 8;
+		int prefix_bits = second_entry.rtenty.mask % 8;
+
+		for (int i = 0; i < prefix_bytes; i++)
+		{
+			if (first_address_v6->sin6_addr.s6_addr[i] != second_address_v6->sin6_addr.s6_addr[i])
+				return false;			
+		}
+
+		if (prefix_bits > 0)
+		{
+			uint8_t mask = (0xFF << (8 - prefix_bits)) & 0xFF;
+			mask = htonl(mask);
+			if ((first_address_v6->sin6_addr.s6_addr[prefix_bytes] & mask) != (second_address_v6->sin6_addr.s6_addr[prefix_bytes] & mask))
+				return false;			
+		}
+		return true;
+	}
+
+	return false;
+}
+
+void nl_ops(int cmd, int fib, snl_parsed_route &rt)
+{
+	int error = rtmsg_nl(cmd, rt.rta_rtflags, fib, rt.rta_dst, rt.rtm_dst_len, rt.rta_gw, rt.rtax_mtu, rt.rtax_weight);
+	if (error != 0)
+	{
+		if (cmd == RTSOCK_RTM_ADD)
+		{
+			add_later_entry later_entry = { .rtenty = {.mask = rt.rtm_dst_len, .flags = (int)rt.rta_rtflags, .mtu = rt.rtax_mtu}, .fib = fib };
+			copy_sockaddr(rt.rta_dst, &later_entry.rtenty.destination);
+			copy_sockaddr(rt.rta_gw, &later_entry.rtenty.gateway);
+			entries_add_later.emplace_back(std::move(later_entry));
+		}
+
+		if (cmd == RTSOCK_RTM_DELETE)
+			std::cerr << std::format("Delete route {}/{} of fib {} failed: {}\n", sockaddr_to_string(rt.rta_dst), (int)rt.rtm_dst_len, fib, strerror(error));
+	}
+}
+
+bool init_entries()
 {
 	sockaddr_in *sin4 = nullptr;
 	sockaddr_in6 *sin6 = nullptr;
+
+	struct snl_state ss = {};
+
+	if (!snl_init(&ss, NETLINK_ROUTE))
+		return (false);
+	ifmap = prepare_ifmap_netlink(&ss);
+	if (ifmap.empty()) {
+		snl_free(&ss);
+		return (false);
+	}
 
 	sin4 = (sockaddr_in*)&default_entries[0].destination;
 	inet_pton(AF_INET, "127.0.0.1", &(sin4->sin_addr));
@@ -524,6 +586,9 @@ void init_entries()
 	default_entries[1].gateway.sdl_len = default_entries[2].gateway.sdl_len =
 		default_entries[3].gateway.sdl_len = default_entries[4].gateway.sdl_len =
 		default_entries[5].gateway.sdl_len = sizeof(sockaddr_dl);
+	
+	snl_free(&ss);
+	return true;
 }
 
 fib_action_t parse_args(const std::vector<std::string> &args)
@@ -539,82 +604,67 @@ fib_action_t parse_args(const std::vector<std::string> &args)
 	if (args.size() < 2)
 		return fib_action;
 
+	bool has_zero_fib = false;
+	std::vector<std::string> invalids;
+
 	if (args[0] == "copy")
 	{
 		if (args.size() < 4)
 			return fib_action;
 
-		try
+		int copy_from_fib = 0;
+		std::string input_arg = args[1];
+		auto [ptr, ec] = std::from_chars(input_arg.data(), input_arg.data() + input_arg.size(), copy_from_fib);
+		if (copy_from_fib < 0 || copy_from_fib > numfibs - 1 || ec != std::errc{})
 		{
-			int copy_from_fib = std::stoi(args[1]);
-			if (copy_from_fib < 0 || copy_from_fib > numfibs - 1)
-			{
-				std::cerr << std::format("Invalid fib: {}\n", copy_from_fib);
-				fib_action.action = action_t::invalid;
-				return fib_action;
-			}
-
-			if (args[2] != "to")
-				return fib_action;
-
-			fib_action.target_fib = copy_from_fib;
-
-			for (size_t i = 3; i < args.size(); i++)
-			{
-				if (args[i].find(',') == std::string::npos)
-				{
-					try
-					{
-						int current_fib = std::stoi(args[i]);
-						if (current_fib < 0 || current_fib > numfibs - 1)
-						{
-							std::cerr << std::format("Invalid fib: {}\n", current_fib);
-							continue;
-						}
-
-						if (copy_from_fib == current_fib)
-							continue;
-
-						if (current_fib == 0)
-						{
-							std::cerr << "Replacing main table (fib 0) is not a good idea. The operation on fib 0 has skipped.\n";
-							continue;
-						}
-
-						fib_action.multiple_fibs.push_back(current_fib);
-					}
-					catch (...)
-					{
-						std::cerr << args[i] << " is an invalid input\n";
-						continue;
-					}
-				}
-				else
-				{
-					std::stringstream sstr(args[i]);
-					while (sstr.good())
-					{
-						std::string str;
-						std::getline(sstr, str, ',');
-						try
-						{
-							fib_action.multiple_fibs.push_back(std::stoi(str));
-						}
-						catch (...)
-						{
-							std::cerr << str << " is an invalid input\n";
-							continue;
-						}
-					}
-				}
-			}
-
-			fib_action.action = action_t::copy;
-		}
-		catch (...)
-		{
+			std::cerr << std::format("Invalid fib: {}\n", copy_from_fib);
+			fib_action.action = action_t::invalid;
 			return fib_action;
 		}
+
+		if (args[2] != "to")
+			return fib_action;
+
+		fib_action.target_fib = copy_from_fib;
+
+		for (size_t i = 3; i < args.size(); i++)
+		{
+			if (args[i].find("all") != std::string::npos)
+			{
+				std::vector<int> all = all_fibs(numfibs);
+				fib_action.multiple_fibs.insert(all.begin(), all.end());
+				continue;
+			}
+
+			if (args[i].find(',') == std::string::npos)
+			{
+				auto [valid_fibs, invalid_fibs, is_zero_fib] = find_fibnum(args[i], numfibs);
+
+				has_zero_fib |= is_zero_fib;
+
+				fib_action.multiple_fibs.insert(valid_fibs.begin(), valid_fibs.end());
+				invalids.insert(invalids.end(), invalid_fibs.begin(), invalid_fibs.end());
+			}
+			else
+			{
+				std::stringstream sstr(args[i]);
+				while (sstr.good())
+				{
+					std::string str;
+					std::getline(sstr, str, ',');
+					auto [valid_fibs, invalid_fibs, is_zero_fib] = find_fibnum(str, numfibs);
+
+					has_zero_fib |= is_zero_fib;
+
+					fib_action.multiple_fibs.insert(valid_fibs.begin(), valid_fibs.end());
+					invalids.insert(invalids.end(), invalid_fibs.begin(), invalid_fibs.end());
+				}
+			}
+		}
+
+		fib_action.multiple_fibs.erase(copy_from_fib);
+
+		fib_action.action = action_t::copy;
 	}
 
 	if (args[0] == "reset")
@@ -626,28 +676,12 @@ fib_action_t parse_args(const std::vector<std::string> &args)
 		{
 			if (args[i].find(',') == std::string::npos)
 			{
-				try
-				{
-					int current_fib = std::stoi(args[i]);
-					if (current_fib < 0 || current_fib > numfibs - 1)
-					{
-						std::cerr << std::format("Invalid fib: {}\n", current_fib);
-						continue;
-					}
+				auto [valid_fibs, invalid_fibs, is_zero_fib] = find_fibnum(args[i], numfibs);
 
-					if (current_fib == 0)
-					{
-						std::cerr << "Replacing main table (fib 0) is not a good idea. The operation on fib 0 has skipped.\n";
-						continue;
-					}
+				has_zero_fib |= is_zero_fib;
 
-					fib_action.multiple_fibs.push_back(current_fib);
-				}
-				catch (...)
-				{
-					std::cerr << args[i] << " is an invalid input\n";
-					continue;
-				}
+				fib_action.multiple_fibs.insert(valid_fibs.begin(), valid_fibs.end());
+				invalids.insert(invalids.end(), invalid_fibs.begin(), invalid_fibs.end());
 			}
 			else
 			{
@@ -656,27 +690,13 @@ fib_action_t parse_args(const std::vector<std::string> &args)
 				{
 					std::string str;
 					std::getline(sstr, str, ',');
-					try
-					{
-						int current_fib = std::stoi(str);
-						if (current_fib < 0 || current_fib > numfibs - 1)
-						{
-							std::cerr << std::format("Invalid fib: {}\n", current_fib);
-							continue;
-						}
 
-						if (current_fib == 0)
-						{
-							std::cerr << "Replacing main table (fib 0) is not a good idea. The operation on fib 0 has skipped.\n";
-							continue;
-						}
-						fib_action.multiple_fibs.push_back(current_fib);
-					}
-					catch (...)
-					{
-						std::cerr << str << " is an invalid input\n";
-						continue;
-					}
+					auto [valid_fibs, invalid_fibs, is_zero_fib] = find_fibnum(args[i], numfibs);
+
+					has_zero_fib |= is_zero_fib;
+
+					fib_action.multiple_fibs.insert(valid_fibs.begin(), valid_fibs.end());
+					invalids.insert(invalids.end(), invalid_fibs.begin(), invalid_fibs.end());
 				}
 			}
 
@@ -684,7 +704,102 @@ fib_action_t parse_args(const std::vector<std::string> &args)
 		}
 	}
 
+	if (!fib_action.multiple_fibs.empty())
+	{
+		if (has_zero_fib)
+			std::cout << "Replacing main table (fib 0) is not a good idea. The operation on fib 0 has skipped.\n";
+
+		if (!invalids.empty())
+		{
+			std::cerr << "Invalid fib: ";
+			for (const auto &str : invalids)
+			{
+				std::cerr << str << " ";
+			}
+			std::cerr << "\n";
+		}
+	}
+
 	return fib_action;
+}
+
+std::tuple<std::set<int>, std::vector<std::string>, bool>
+find_fibnum(const std::string &str, int fib_total)
+{
+	std::set<int> valid_fibs;
+	std::vector<std::string> invalid_fibs;
+	bool is_zero_fib = false;
+
+	int current_fib = 0;
+	auto [ptr, ec] = std::from_chars(str.data(), str.data() + str.size(), current_fib);
+	if (current_fib < 0 || current_fib > fib_total - 1 || ec != std::errc{})
+	{
+		invalid_fibs.push_back(str);
+		return { valid_fibs, invalid_fibs, is_zero_fib };
+	}
+
+	if (current_fib == 0)
+	{
+		is_zero_fib = true;
+		return { valid_fibs, invalid_fibs, is_zero_fib };
+	}
+
+	valid_fibs.insert(current_fib);
+
+	return { valid_fibs, invalid_fibs, is_zero_fib };
+}
+
+std::vector<int> all_fibs(int fib_total)
+{
+	std::vector<int> all;
+	for (int i = 1; i < fib_total; i++)
+	{
+		all.push_back(i);
+	}
+	return all;
+}
+
+std::string sockaddr_to_string(sockaddr_in *addr)
+{
+	std::string address_string;
+	char buf[32] = {};
+	inet_ntop(AF_INET, &addr->sin_addr, buf, addr->sin_len);
+	address_string = buf;
+	return address_string;
+}
+
+std::string sockaddr_to_string(sockaddr_in6 * addr)
+{
+	std::string address_string;
+	char buf[128] = {};
+	inet_ntop(AF_INET6, &addr->sin6_addr, buf, addr->sin6_len);
+	address_string = buf;
+	return address_string;
+}
+
+std::string sockaddr_to_string(sockaddr_storage *addr)
+{
+	if (addr->ss_family == AF_INET)
+		return sockaddr_to_string((sockaddr_in *)addr);
+	if (addr->ss_family == AF_INET6)
+		return sockaddr_to_string((sockaddr_in6 *)addr);
+
+	return {};
+}
+
+std::string sockaddr_to_string(sockaddr *addr)
+{
+	if (addr->sa_family == AF_INET)
+		return sockaddr_to_string((sockaddr_in *)addr);
+	if (addr->sa_family == AF_INET6)
+		return sockaddr_to_string((sockaddr_in6 *)addr);
+
+	return {};
+}
+
+void copy_sockaddr(void *src, void *dst)
+{
+	std::copy_n((unsigned char*)src, ((sockaddr_storage *)src)->ss_len, (unsigned char*)dst);
 }
 
 void print_usage()
@@ -696,14 +811,16 @@ void print_usage()
 		"\tfibmgr copy 0 to 1,2\n"
 		"\tfibmgr copy 0 to 1 2 3\n"
 		"\tfibmgr copy 0 to 1,2 3\n"
+		"\tfibmgr copy 0 to all\n"
 		"\tfibmgr reset 1,2\n"
 		"\tfibmgr reset 1 2 3\n"
-		"\tfibmgr reset 1,2 3\n";
+		"\tfibmgr reset 1,2 3\n"
+		"\tfibmgr reset all\n";
 
 	std::cout << usage_info;
 }
 
-bool copy_fib(fib_action_t &fib_action)
+void copy_fib(fib_action_t &fib_action)
 {
 	for (auto fib : fib_action.multiple_fibs)
 	{
@@ -711,12 +828,14 @@ bool copy_fib(fib_action_t &fib_action)
 		routing_table_netlink_ops(fib, AF_INET6, action_t::remove);
 	}
 
-	routing_table_netlink_ops(fib_action.target_fib, AF_INET, action_t::copy, fib_action.multiple_fibs);
-	routing_table_netlink_ops(fib_action.target_fib, AF_INET6, action_t::copy, fib_action.multiple_fibs);
-	return false;
+	std::vector<int> multiple_fibs(fib_action.multiple_fibs.begin(), fib_action.multiple_fibs.end());
+
+	routing_table_netlink_ops(fib_action.target_fib, AF_INET, action_t::copy, multiple_fibs);
+	routing_table_netlink_ops(fib_action.target_fib, AF_INET6, action_t::copy, multiple_fibs);
+	try_add_again();
 }
 
-bool reset_fib(fib_action_t &fib_action)
+void reset_fib(fib_action_t &fib_action)
 {
 	for (auto fib : fib_action.multiple_fibs)
 	{
@@ -724,6 +843,4 @@ bool reset_fib(fib_action_t &fib_action)
 		routing_table_netlink_ops(fib, AF_INET6, action_t::remove);
 		add_defaults(fib);
 	}
-
-	return false;
 }
