@@ -17,3 +17,5 @@ Examples:
 ```
 
 Note: This tool can only works on FreeBSD version ≥ 14.2
+
+[Jail](https://man.freebsd.org/cgi/man.cgi?jail) is not supported yet.
