@@ -73,6 +73,26 @@ void copy_sockaddr(void *src, void *dst);
 bool
 nl_init_socket(struct snl_state *ss);
 
+struct nl_helper
+{
+	bool init()
+	{
+		init_success = nl_init_socket(&state);
+		return init_success;
+	}
+
+	~nl_helper()
+	{
+		if (init_success)
+			snl_free(&state);
+	}
+
+	snl_state state = {};
+
+private:
+	bool init_success = false;
+};
+
 bool
 nl_init_socket(struct snl_state *ss)
 {
@@ -272,12 +292,11 @@ rtmsg_nl(int cmd, int rtm_flags, int fib,
          struct sockaddr *dst, uint8_t mask, struct sockaddr *gw,
          u_long rmx_mtu, u_long rmx_weight)
 {
-	struct snl_state ss_cmd = {};
-	if (!nl_init_socket(&ss_cmd))
+	nl_helper helper = {};
+	if (!helper.init())
 		return -1;
-	int error = rtmsg_nl_int(&ss_cmd, cmd, rtm_flags, fib, dst, mask, gw, rmx_mtu, rmx_weight);
-	snl_free(&ss_cmd);
 
+	int error = rtmsg_nl_int(&helper.state, cmd, rtm_flags, fib, dst, mask, gw, rmx_mtu, rmx_weight);
 	return (error);
 }
 
@@ -373,9 +392,9 @@ routing_table_netlink_ops(int fibnum, int af, action_t action, const std::vector
 	int fam = AF_UNSPEC;
 	struct nlmsghdr *hdr;
 	struct snl_errmsg_data e = {};
-	struct snl_state ss = {};
+	nl_helper helper = {};
 
-	if (!snl_init(&ss, NETLINK_ROUTE))
+	if (!helper.init())
 		return (false);
 
 	struct
@@ -388,7 +407,7 @@ routing_table_netlink_ops(int fibnum, int af, action_t action, const std::vector
 		.hdr = {
 			.nlmsg_type = RTM_GETROUTE,
 			.nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST,
-			.nlmsg_seq = snl_get_seq(&ss)
+			.nlmsg_seq = snl_get_seq(&helper.state)
 		},
 		.rtmsg = { .rtm_family = (unsigned char)af },
 		.nla_fibnum = {
@@ -399,13 +418,10 @@ routing_table_netlink_ops(int fibnum, int af, action_t action, const std::vector
 	};
 	msg.hdr.nlmsg_len = sizeof(msg);
 
-	if (!snl_send_message(&ss, &msg.hdr))
-	{
-		snl_free(&ss);
+	if (!snl_send_message(&helper.state, &msg.hdr))
 		return (false);
-	}
 
-	while ((hdr = snl_read_reply_multi(&ss, msg.hdr.nlmsg_seq, &e)) != NULL)
+	while ((hdr = snl_read_reply_multi(&helper.state, msg.hdr.nlmsg_seq, &e)) != NULL)
 	{
 		struct rtmsg *rtm = (struct rtmsg *)(hdr + 1);
 		if (fam != rtm->rtm_family)
@@ -413,17 +429,16 @@ routing_table_netlink_ops(int fibnum, int af, action_t action, const std::vector
 
 		if (action == action_t::copy)
 		{
-			routing_table_entry_netlink_ops(RTSOCK_RTM_ADD, other_fibs, &ss, hdr);
+			routing_table_entry_netlink_ops(RTSOCK_RTM_ADD, other_fibs, &helper.state, hdr);
 		}
 
 		if (action == action_t::remove)
 		{
 			std::vector<int> target_fib = { fibnum };
-			routing_table_entry_netlink_ops(RTSOCK_RTM_DELETE, target_fib, &ss, hdr);
+			routing_table_entry_netlink_ops(RTSOCK_RTM_DELETE, target_fib, &helper.state, hdr);
 		}
-		snl_clear_lb(&ss);
+		snl_clear_lb(&helper.state);
 	}
-	snl_free(&ss);
 	return (true);
 }
 
@@ -531,15 +546,13 @@ bool init_entries()
 	sockaddr_in *sin4 = nullptr;
 	sockaddr_in6 *sin6 = nullptr;
 
-	struct snl_state ss = {};
+	nl_helper helper = {};
+	
+	if (!snl_init(&helper.state, NETLINK_ROUTE))
+		return (false);
 
-	if (!snl_init(&ss, NETLINK_ROUTE))
+	if (ifmap = prepare_ifmap_netlink(&helper.state); ifmap.empty())
 		return (false);
-	ifmap = prepare_ifmap_netlink(&ss);
-	if (ifmap.empty()) {
-		snl_free(&ss);
-		return (false);
-	}
 
 	sin4 = (sockaddr_in*)&default_entries[0].destination;
 	inet_pton(AF_INET, "127.0.0.1", &(sin4->sin_addr));
@@ -587,7 +600,6 @@ bool init_entries()
 		default_entries[3].gateway.sdl_len = default_entries[4].gateway.sdl_len =
 		default_entries[5].gateway.sdl_len = sizeof(sockaddr_dl);
 	
-	snl_free(&ss);
 	return true;
 }
 
@@ -674,6 +686,13 @@ fib_action_t parse_args(const std::vector<std::string> &args)
 
 		for (size_t i = 1; i < args.size(); i++)
 		{
+			if (args[i].find("all") != std::string::npos)
+			{
+				std::vector<int> all = all_fibs(numfibs);
+				fib_action.multiple_fibs.insert(all.begin(), all.end());
+				continue;
+			}
+
 			if (args[i].find(',') == std::string::npos)
 			{
 				auto [valid_fibs, invalid_fibs, is_zero_fib] = find_fibnum(args[i], numfibs);
@@ -699,9 +718,9 @@ fib_action_t parse_args(const std::vector<std::string> &args)
 					invalids.insert(invalids.end(), invalid_fibs.begin(), invalid_fibs.end());
 				}
 			}
-
-			fib_action.action = action_t::reset;
 		}
+
+		fib_action.action = action_t::reset;
 	}
 
 	if (!fib_action.multiple_fibs.empty())
