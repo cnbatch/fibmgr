@@ -1,5 +1,6 @@
 #pragma once
 #include <format>
+#include <deque>
 #include <vector>
 #include <string>
 #include <set>
@@ -10,12 +11,15 @@ struct fib_action_t
 {
 	action_t action;
 	int target_fib;
+	int ipv4;
+	int ipv6;
 	std::set<int> multiple_fibs;
 };
 
 bool init_entries();
 
 fib_action_t parse_args(const std::vector<std::string> &args);
+fib_action_t parse_args(std::deque<std::string> args);
 
 void print_usage();
 

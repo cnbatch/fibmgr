@@ -53,7 +53,8 @@ struct add_later_entry
 	int fib;
 };
 
-routing_entry default_entries[6] = {};
+routing_entry default_v4_entry = {};
+routing_entry default_v6_entries[5] = {};
 std::vector<add_later_entry> entries_add_later;
 int lo0_index = 0;
 
@@ -111,7 +112,8 @@ nl_init_socket(struct snl_state *ss)
 	return false;
 }
 
-void add_defaults(int fibnum);
+void add_v4_default(int fibnum);
+void add_v6_defaults(int fibnum);
 void try_add_again();
 bool dependency_checker(add_later_entry &second_entry, add_later_entry &first_entry);
 void nl_ops(int cmd, int fib, snl_parsed_route &rt);
@@ -205,8 +207,8 @@ rtmsg_nl_int(struct snl_state *ss, int cmd, int rtm_flags, int fib,
 	struct rtmsg *rtm = snl_reserve_msg_object(&nw, struct rtmsg);
 	rtm->rtm_family = dst->sa_family;
 	rtm->rtm_protocol = RTPROT_STATIC;
-	rtm->rtm_type = rtm_type;
-	rtm->rtm_dst_len = plen;
+	rtm->rtm_type = (unsigned char)rtm_type;
+	rtm->rtm_dst_len = (unsigned char)plen;
 
 	/* Request exact prefix match if mask is set */
 	if (cmd == RTSOCK_RTM_GET)
@@ -442,13 +444,22 @@ routing_table_netlink_ops(int fibnum, int af, action_t action, const std::vector
 	return (true);
 }
 
-void add_defaults(int fib)
+void add_v4_default(int fib)
 {
-	for (int i = 0; i < 6; i++)
+	default_v4_entry.gateway.sdl_index = lo0_index;
+	int error = rtmsg_nl(RTSOCK_RTM_ADD, default_v4_entry.flags, fib, (sockaddr *)&default_v4_entry.destination,
+		                 default_v4_entry.mask, (sockaddr *)&default_v4_entry.gateway, default_v4_entry.mtu, default_v4_entry.weight);
+	if (error != 0)
+		std::cerr << std::format("Add route to fib {} failed: {}\n", fib, strerror(error));
+}
+
+void add_v6_defaults(int fib)
+{
+	for (int i = 0; i < 5; i++)
 	{
-		default_entries[i].gateway.sdl_index = lo0_index;
-		int error = rtmsg_nl(RTSOCK_RTM_ADD, default_entries[i].flags, fib, (sockaddr*)&default_entries[i].destination,
-			default_entries[i].mask, (sockaddr*)&default_entries[i].gateway, default_entries[i].mtu, default_entries[i].weight);
+		default_v6_entries[i].gateway.sdl_index = lo0_index;
+		int error = rtmsg_nl(RTSOCK_RTM_ADD, default_v6_entries[i].flags, fib, (sockaddr*)&default_v6_entries[i].destination,
+			default_v6_entries[i].mask, (sockaddr*)&default_v6_entries[i].gateway, default_v6_entries[i].mtu, default_v6_entries[i].weight);
 		if (error != 0)
 			std::cerr << std::format("Add route to fib {} failed: {}\n", fib, strerror(error));
 	}
@@ -525,7 +536,7 @@ bool dependency_checker(add_later_entry &second_entry, add_later_entry &first_en
 
 void nl_ops(int cmd, int fib, snl_parsed_route &rt)
 {
-	int error = rtmsg_nl(cmd, rt.rta_rtflags, fib, rt.rta_dst, rt.rtm_dst_len, rt.rta_gw, rt.rtax_mtu, rt.rtax_weight);
+	int error = rtmsg_nl(cmd, (int)rt.rta_rtflags, fib, rt.rta_dst, rt.rtm_dst_len, rt.rta_gw, rt.rtax_mtu, rt.rtax_weight);
 	if (error != 0)
 	{
 		if (cmd == RTSOCK_RTM_ADD)
@@ -554,56 +565,63 @@ bool init_entries()
 	if (ifmap = prepare_ifmap_netlink(&helper.state); ifmap.empty())
 		return (false);
 
-	sin4 = (sockaddr_in*)&default_entries[0].destination;
+	sin4 = (sockaddr_in*)&default_v4_entry.destination;
 	inet_pton(AF_INET, "127.0.0.1", &(sin4->sin_addr));
-	default_entries[0].destination.ss_family = AF_INET;
-	default_entries[0].destination.ss_len = sizeof(sockaddr_in);
-	default_entries[0].gateway.sdl_family = AF_LINK;
-	default_entries[0].gateway.sdl_len = sizeof(sockaddr_dl);
-	default_entries[0].mask = 32;
-	default_entries[0].flags =  RTF_HOST | RTF_STATIC;
+	default_v4_entry.destination.ss_family = AF_INET;
+	default_v4_entry.destination.ss_len = sizeof(sockaddr_in);
+	default_v4_entry.gateway.sdl_family = AF_LINK;
+	default_v4_entry.gateway.sdl_len = sizeof(sockaddr_dl);
+	default_v4_entry.mask = 32;
+	default_v4_entry.flags =  RTF_HOST | RTF_STATIC;
 
-	sin6 = (sockaddr_in6*)&default_entries[1].destination;
-	default_entries[1].mask = 96;
-	default_entries[1].flags = RTF_UP | RTF_REJECT | RTF_STATIC;
+	sin6 = (sockaddr_in6*)&default_v6_entries[0].destination;
+	default_v6_entries[0].mask = 96;
+	default_v6_entries[0].flags = RTF_UP | RTF_REJECT | RTF_STATIC;
 
-	sin6 = (sockaddr_in6*)&default_entries[2].destination;
+	sin6 = (sockaddr_in6*)&default_v6_entries[1].destination;
 	inet_pton(AF_INET6, "::1", &(sin6->sin6_addr));
-	default_entries[2].mask = 128;
-	default_entries[2].flags =  RTF_HOST | RTF_STATIC;
+	default_v6_entries[1].mask = 128;
+	default_v6_entries[1].flags =  RTF_HOST | RTF_STATIC;
 
-	sin6 = (sockaddr_in6*)&default_entries[3].destination;
+	sin6 = (sockaddr_in6*)&default_v6_entries[2].destination;
 	inet_pton(AF_INET6, "::ffff:0.0.0.0", &(sin6->sin6_addr));
-	default_entries[3].mask = 96;
-	default_entries[3].flags = RTF_UP | RTF_REJECT | RTF_STATIC;
+	default_v6_entries[2].mask = 96;
+	default_v6_entries[2].flags = RTF_UP | RTF_REJECT | RTF_STATIC;
 
-	sin6 = (sockaddr_in6*)&default_entries[4].destination;
+	sin6 = (sockaddr_in6*)&default_v6_entries[3].destination;
 	inet_pton(AF_INET6, "fe80::", &(sin6->sin6_addr));
-	default_entries[4].mask = 10;
-	default_entries[4].flags = RTF_UP | RTF_REJECT | RTF_STATIC;
+	default_v6_entries[3].mask = 10;
+	default_v6_entries[3].flags = RTF_UP | RTF_REJECT | RTF_STATIC;
 
-	sin6 = (sockaddr_in6*)&default_entries[5].destination;
+	sin6 = (sockaddr_in6*)&default_v6_entries[4].destination;
 	inet_pton(AF_INET6, "ff02::", &(sin6->sin6_addr));
-	default_entries[5].mask = 16;
-	default_entries[5].flags = RTF_UP | RTF_REJECT | RTF_STATIC;
+	default_v6_entries[4].mask = 16;
+	default_v6_entries[4].flags = RTF_UP | RTF_REJECT | RTF_STATIC;
 
-	default_entries[1].destination.ss_family = default_entries[2].destination.ss_family =
-		default_entries[3].destination.ss_family = default_entries[4].destination.ss_family =
-		default_entries[5].destination.ss_family = AF_INET6;
-	default_entries[1].destination.ss_len = default_entries[2].destination.ss_len =
-		default_entries[3].destination.ss_len = default_entries[4].destination.ss_len =
-		default_entries[5].destination.ss_len = sizeof(sockaddr_in6);
-	default_entries[1].gateway.sdl_family = default_entries[2].gateway.sdl_family =
-		default_entries[3].gateway.sdl_family = default_entries[4].gateway.sdl_family =
-		default_entries[5].gateway.sdl_family = AF_LINK;
-	default_entries[1].gateway.sdl_len = default_entries[2].gateway.sdl_len =
-		default_entries[3].gateway.sdl_len = default_entries[4].gateway.sdl_len =
-		default_entries[5].gateway.sdl_len = sizeof(sockaddr_dl);
+	default_v6_entries[0].destination.ss_family = default_v6_entries[1].destination.ss_family =
+		default_v6_entries[2].destination.ss_family = default_v6_entries[3].destination.ss_family =
+		default_v6_entries[4].destination.ss_family = AF_INET6;
+	default_v6_entries[0].destination.ss_len = default_v6_entries[1].destination.ss_len =
+		default_v6_entries[2].destination.ss_len = default_v6_entries[3].destination.ss_len =
+		default_v6_entries[4].destination.ss_len = sizeof(sockaddr_in6);
+	default_v6_entries[0].gateway.sdl_family = default_v6_entries[1].gateway.sdl_family =
+		default_v6_entries[2].gateway.sdl_family = default_v6_entries[3].gateway.sdl_family =
+		default_v6_entries[4].gateway.sdl_family = AF_LINK;
+	default_v6_entries[0].gateway.sdl_len = default_v6_entries[1].gateway.sdl_len =
+		default_v6_entries[2].gateway.sdl_len = default_v6_entries[3].gateway.sdl_len =
+		default_v6_entries[4].gateway.sdl_len = sizeof(sockaddr_dl);
 	
 	return true;
 }
 
 fib_action_t parse_args(const std::vector<std::string> &args)
+{
+	std::deque<std::string> args_deq;
+	std::copy(args.begin(), args.end(), std::back_inserter(args_deq));
+	return parse_args(std::move(args_deq));
+}
+
+fib_action_t parse_args(std::deque<std::string> args)
 {
 	fib_action_t fib_action = {};
 	fib_action.action = action_t::unknow;
@@ -615,6 +633,26 @@ fib_action_t parse_args(const std::vector<std::string> &args)
 
 	if (args.size() < 2)
 		return fib_action;
+
+	for (int i = 1; i < 2; i++)
+	{
+		if (args[0] == "-4")
+		{
+			fib_action.ipv4 = true;
+			args.pop_front();
+			i = 0;
+		}
+
+		if (args[0] == "-6")
+		{
+			fib_action.ipv6 = true;
+			args.pop_front();
+			i = 0;
+		}
+	}
+
+	if (fib_action.ipv4 == fib_action.ipv6)
+		fib_action.ipv4 = fib_action.ipv6 = true;
 
 	bool has_zero_fib = false;
 	std::vector<std::string> invalids;
@@ -824,17 +862,19 @@ void copy_sockaddr(void *src, void *dst)
 void print_usage()
 {
 	char usage_info[] = "fibmgr: usage:\n"
-		"\tfibmgr copy fibnum to fibnum1,fibnum2 fibnum3\n"
-		"\tfibmgr reset fibnum fibnum1,fibnum2 fibnum3\n"
+		"\tfibmgr [-4] [-6] copy fibnum to fibnum1,fibnum2 fibnum3\n"
+		"\tfibmgr [-v] [-6] reset fibnum fibnum1,fibnum2 fibnum3\n"
 		"Examples:\n"
 		"\tfibmgr copy 0 to 1,2\n"
 		"\tfibmgr copy 0 to 1 2 3\n"
 		"\tfibmgr copy 0 to 1,2 3\n"
 		"\tfibmgr copy 0 to all\n"
+		"\tfibmgr -4 copy 0 to all\n"
 		"\tfibmgr reset 1,2\n"
 		"\tfibmgr reset 1 2 3\n"
 		"\tfibmgr reset 1,2 3\n"
-		"\tfibmgr reset all\n";
+		"\tfibmgr reset all\n"
+		"\tfibmgr -6 reset all\n";
 
 	std::cout << usage_info;
 }
@@ -843,14 +883,18 @@ void copy_fib(fib_action_t &fib_action)
 {
 	for (auto fib : fib_action.multiple_fibs)
 	{
-		routing_table_netlink_ops(fib, AF_INET, action_t::remove);
-		routing_table_netlink_ops(fib, AF_INET6, action_t::remove);
+		if (fib_action.ipv4)
+			routing_table_netlink_ops(fib, AF_INET, action_t::remove);
+		if (fib_action.ipv6)
+			routing_table_netlink_ops(fib, AF_INET6, action_t::remove);
 	}
 
 	std::vector<int> multiple_fibs(fib_action.multiple_fibs.begin(), fib_action.multiple_fibs.end());
 
-	routing_table_netlink_ops(fib_action.target_fib, AF_INET, action_t::copy, multiple_fibs);
-	routing_table_netlink_ops(fib_action.target_fib, AF_INET6, action_t::copy, multiple_fibs);
+	if (fib_action.ipv4)
+		routing_table_netlink_ops(fib_action.target_fib, AF_INET, action_t::copy, multiple_fibs);
+	if (fib_action.ipv6)
+		routing_table_netlink_ops(fib_action.target_fib, AF_INET6, action_t::copy, multiple_fibs);
 	try_add_again();
 }
 
@@ -858,8 +902,13 @@ void reset_fib(fib_action_t &fib_action)
 {
 	for (auto fib : fib_action.multiple_fibs)
 	{
-		routing_table_netlink_ops(fib, AF_INET, action_t::remove);
-		routing_table_netlink_ops(fib, AF_INET6, action_t::remove);
-		add_defaults(fib);
+		if (fib_action.ipv4)
+			routing_table_netlink_ops(fib, AF_INET, action_t::remove);
+		if (fib_action.ipv6)
+			routing_table_netlink_ops(fib, AF_INET6, action_t::remove);
+		if (fib_action.ipv4)
+			add_v4_default(fib);
+		if (fib_action.ipv6)
+			add_v6_defaults(fib);
 	}
 }
