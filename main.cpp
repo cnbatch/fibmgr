@@ -34,20 +34,20 @@ int main(int argc, char *argv[])
 			copy_fib(fib_action);
 		}
 		break;
-	case action_t::reset:
+	case action_t::clear:
 		if (fib_action.multiple_fibs.empty())
 		{
 			std::cout << "No action is taken.\n";
 		}
 		else
 		{
-			std::cout << "Reseting fib ";
+			std::cout << "clearing fib ";
 			for (auto num : fib_action.multiple_fibs)
 			{
 				std::cout << num << " ";
 			}
 			std::cout << "\n";
-			reset_fib(fib_action);
+			clear_fib(fib_action);
 		}
 		break;
 	default:

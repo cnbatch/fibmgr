@@ -59,7 +59,7 @@ std::vector<add_later_entry> entries_add_later;
 int lo0_index = 0;
 
 // first: valid, second: invalid
-std::tuple<std::set<int>, std::vector<std::string>, bool>
+std::pair<std::set<int>, std::vector<std::string>>
 find_fibnum(const std::string &str, int fib_total);
 
 std::vector<int> all_fibs(int fib_total);
@@ -654,7 +654,6 @@ fib_action_t parse_args(std::deque<std::string> args)
 	if (fib_action.ipv4 == fib_action.ipv6)
 		fib_action.ipv4 = fib_action.ipv6 = true;
 
-	bool has_zero_fib = false;
 	std::vector<std::string> invalids;
 
 	if (args[0] == "copy")
@@ -683,17 +682,18 @@ fib_action_t parse_args(std::deque<std::string> args)
 			{
 				std::vector<int> all = all_fibs(numfibs);
 				fib_action.multiple_fibs.insert(all.begin(), all.end());
+				fib_action.multiple_fibs.erase(copy_from_fib);
 				continue;
 			}
 
 			if (args[i].find(',') == std::string::npos)
 			{
-				auto [valid_fibs, invalid_fibs, is_zero_fib] = find_fibnum(args[i], numfibs);
-
-				has_zero_fib |= is_zero_fib;
+				auto [valid_fibs, invalid_fibs] = find_fibnum(args[i], numfibs);
 
 				fib_action.multiple_fibs.insert(valid_fibs.begin(), valid_fibs.end());
-				invalids.insert(invalids.end(), invalid_fibs.begin(), invalid_fibs.end());
+				fib_action.multiple_fibs.erase(copy_from_fib);
+				if(!invalid_fibs.empty())
+					invalids.insert(invalids.end(), invalid_fibs.begin(), invalid_fibs.end());
 			}
 			else
 			{
@@ -702,12 +702,12 @@ fib_action_t parse_args(std::deque<std::string> args)
 				{
 					std::string str;
 					std::getline(sstr, str, ',');
-					auto [valid_fibs, invalid_fibs, is_zero_fib] = find_fibnum(str, numfibs);
-
-					has_zero_fib |= is_zero_fib;
+					auto [valid_fibs, invalid_fibs] = find_fibnum(str, numfibs);
 
 					fib_action.multiple_fibs.insert(valid_fibs.begin(), valid_fibs.end());
-					invalids.insert(invalids.end(), invalid_fibs.begin(), invalid_fibs.end());
+					fib_action.multiple_fibs.erase(copy_from_fib);
+					if (!invalid_fibs.empty())
+						invalids.insert(invalids.end(), invalid_fibs.begin(), invalid_fibs.end());
 				}
 			}
 		}
@@ -717,7 +717,7 @@ fib_action_t parse_args(std::deque<std::string> args)
 		fib_action.action = action_t::copy;
 	}
 
-	if (args[0] == "reset")
+	if (args[0] == "clear")
 	{
 		if (args.size() < 2)
 			return fib_action;
@@ -733,12 +733,11 @@ fib_action_t parse_args(std::deque<std::string> args)
 
 			if (args[i].find(',') == std::string::npos)
 			{
-				auto [valid_fibs, invalid_fibs, is_zero_fib] = find_fibnum(args[i], numfibs);
-
-				has_zero_fib |= is_zero_fib;
+				auto [valid_fibs, invalid_fibs] = find_fibnum(args[i], numfibs);
 
 				fib_action.multiple_fibs.insert(valid_fibs.begin(), valid_fibs.end());
-				invalids.insert(invalids.end(), invalid_fibs.begin(), invalid_fibs.end());
+				if (!invalid_fibs.empty())
+					invalids.insert(invalids.end(), invalid_fibs.begin(), invalid_fibs.end());
 			}
 			else
 			{
@@ -748,24 +747,20 @@ fib_action_t parse_args(std::deque<std::string> args)
 					std::string str;
 					std::getline(sstr, str, ',');
 
-					auto [valid_fibs, invalid_fibs, is_zero_fib] = find_fibnum(args[i], numfibs);
-
-					has_zero_fib |= is_zero_fib;
+					auto [valid_fibs, invalid_fibs] = find_fibnum(str, numfibs);
 
 					fib_action.multiple_fibs.insert(valid_fibs.begin(), valid_fibs.end());
-					invalids.insert(invalids.end(), invalid_fibs.begin(), invalid_fibs.end());
+					if (!invalid_fibs.empty())
+						invalids.insert(invalids.end(), invalid_fibs.begin(), invalid_fibs.end());
 				}
 			}
 		}
 
-		fib_action.action = action_t::reset;
+		fib_action.action = action_t::clear;
 	}
 
 	if (!fib_action.multiple_fibs.empty())
 	{
-		if (has_zero_fib)
-			std::cout << "Replacing main table (fib 0) is not a good idea. The operation on fib 0 has skipped.\n";
-
 		if (!invalids.empty())
 		{
 			std::cerr << "Invalid fib: ";
@@ -780,36 +775,29 @@ fib_action_t parse_args(std::deque<std::string> args)
 	return fib_action;
 }
 
-std::tuple<std::set<int>, std::vector<std::string>, bool>
+std::pair<std::set<int>, std::vector<std::string>>
 find_fibnum(const std::string &str, int fib_total)
 {
 	std::set<int> valid_fibs;
 	std::vector<std::string> invalid_fibs;
-	bool is_zero_fib = false;
 
 	int current_fib = 0;
 	auto [ptr, ec] = std::from_chars(str.data(), str.data() + str.size(), current_fib);
 	if (current_fib < 0 || current_fib > fib_total - 1 || ec != std::errc{})
 	{
 		invalid_fibs.push_back(str);
-		return { valid_fibs, invalid_fibs, is_zero_fib };
-	}
-
-	if (current_fib == 0)
-	{
-		is_zero_fib = true;
-		return { valid_fibs, invalid_fibs, is_zero_fib };
+		return { valid_fibs, invalid_fibs };
 	}
 
 	valid_fibs.insert(current_fib);
 
-	return { valid_fibs, invalid_fibs, is_zero_fib };
+	return { valid_fibs, invalid_fibs };
 }
 
 std::vector<int> all_fibs(int fib_total)
 {
 	std::vector<int> all;
-	for (int i = 1; i < fib_total; i++)
+	for (int i = 0; i < fib_total; i++)
 	{
 		all.push_back(i);
 	}
@@ -863,18 +851,18 @@ void print_usage()
 {
 	char usage_info[] = "fibmgr: usage:\n"
 		"\tfibmgr [-4] [-6] copy fibnum to fibnum1,fibnum2 fibnum3\n"
-		"\tfibmgr [-v] [-6] reset fibnum fibnum1,fibnum2 fibnum3\n"
+		"\tfibmgr [-v] [-6] clear fibnum fibnum1,fibnum2 fibnum3\n"
 		"Examples:\n"
 		"\tfibmgr copy 0 to 1,2\n"
 		"\tfibmgr copy 0 to 1 2 3\n"
 		"\tfibmgr copy 0 to 1,2 3\n"
 		"\tfibmgr copy 0 to all\n"
 		"\tfibmgr -4 copy 0 to all\n"
-		"\tfibmgr reset 1,2\n"
-		"\tfibmgr reset 1 2 3\n"
-		"\tfibmgr reset 1,2 3\n"
-		"\tfibmgr reset all\n"
-		"\tfibmgr -6 reset all\n";
+		"\tfibmgr clear 1,2\n"
+		"\tfibmgr clear 1 2 3\n"
+		"\tfibmgr clear 1,2 3\n"
+		"\tfibmgr clear all\n"
+		"\tfibmgr -6 clear all\n";
 
 	std::cout << usage_info;
 }
@@ -898,7 +886,7 @@ void copy_fib(fib_action_t &fib_action)
 	try_add_again();
 }
 
-void reset_fib(fib_action_t &fib_action)
+void clear_fib(fib_action_t &fib_action)
 {
 	for (auto fib : fib_action.multiple_fibs)
 	{

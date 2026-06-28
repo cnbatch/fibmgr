@@ -5,7 +5,7 @@
 #include <string>
 #include <set>
 
-enum class action_t { copy, remove, reset, unknow, invalid };
+enum class action_t { copy, remove, clear, unknow, invalid };
 
 struct fib_action_t
 {
@@ -25,4 +25,4 @@ void print_usage();
 
 void copy_fib(fib_action_t &fib_action);
 
-void reset_fib(fib_action_t &fib_action);
+void clear_fib(fib_action_t &fib_action);
