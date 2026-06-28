@@ -1,0 +1,140 @@
+.\" BSD 2-Clause License
+.\" 
+.\" Copyright (c) 2024, cnbatch
+.\" 
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions are met:
+.\" 
+.\" 1. Redistributions of source code must retain the above copyright notice, this
+.\"    list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright notice,
+.\"    this list of conditions and the following disclaimer in the documentation
+.\"    and/or other materials provided with the distribution.
+.\" 
+.\" THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+.\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+.\" DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+.\" FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+.\" SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+.\" CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+.\" OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+.\" OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+.\"
+.Dd June 28, 2026
+.Dt FIBMGR 8
+.Os
+.Sh NAME
+.Nm fibmgr
+.Nd A simple management tool for FreeBSD's FIB (Forwarding Information Base)
+.Sh SYNOPSIS
+.Nm
+.Op Fl 4 \&| Fl 6
+.Cm copy
+.Ar source_fib
+.Cm to
+.Ar target_fib
+.Op Ar target_fib ...
+.No \&| Cm all
+.Pp
+.Nm
+.Op Fl 4 \&| Fl 6
+.Cm clear
+.Ar target_fib
+.Op Ar target_fib ...
+.No \&| Cm all
+.Sh DESCRIPTION
+The
+.Nm
+utility is a lightweight command-line utility designed to simplify the management of FIBs (Forwarding Information Bases / routing tables) in
+.Fx
+systems.
+It enables system administrators to quickly copy routing rules from a specific source FIB to multiple target FIBs, or bulk-clear routing data from specified FIBs.
+.Pp
+The tool offers flexible argument passing, allowing multiple target FIBs to be specified using either comma-separated or space-separated formats, as well as supporting the special
+.Cm all
+keyword for global operations.
+.Sh OPTIONS
+The following global options are supported by
+.Nm :
+.Bl -tag -width indent
+.It Fl 4
+Apply operations to IPv4 routing tables only.
+.It Fl 6
+Apply operations to IPv6 routing tables only.
+.El
+.Pp
+If not specified, both IPv4 and IPv6 routing tables are processed.
+.Sh COMMANDS
+.Bl -tag -width indent
+.It Cm copy
+Copies routing information from a source FIB
+.Pq Ar source_fib
+to one or more target FIBs
+.Pq Ar target_fib .
+.Pp
+.Sy Syntax :
+.Cm copy
+.Ar source_fib
+.Cm to
+.Ar target_fib1 Ns Oo , Ns Ar target_fib2 ... Oc
+.Pp
+.Sy The Cm all Sy Argument :
+When the target FIB is specified as
+.Cm all ,
+the utility copies the source routing table to all available FIBs in the system.
+.It Cm clear
+Clears routing information from one or more target FIBs
+.Pq Ar target_fib .
+.Pp
+.Sy Syntax :
+.Cm clear
+.Ar target_fib1 Ns Oo , Ns Ar target_fib2 ... Oc
+.Pp
+.Sy The Cm all Sy Argument :
+When the target FIB is specified as
+.Cm all ,
+the utility clears all FIBs in the system (use with caution).
+.El
+.Sh EXAMPLES
+Below are some common use cases and configuration examples:
+.Pp
+.Sy 1. Copying FIB Data
+.Pp
+Copy routing table from FIB 0 to FIB 1 and FIB 2 (comma-separated):
+.Dl fibmgr copy 0 to 1,2
+.Pp
+Copy routing table from FIB 0 to FIB 1, 2, and 3 (space-separated):
+.Dl fibmgr copy 0 to 1 2 3
+.Pp
+Mix comma and space separators for multiple target FIBs:
+.Dl fibmgr copy 0 to 1,2 3
+.Pp
+Copy the routing table from FIB 0 to all available FIBs:
+.Dl fibmgr copy 0 to all
+.Pp
+Copy only the IPv4 routing table from FIB 0 to all FIBs:
+.Dl fibmgr -4 copy 0 to all
+.Pp
+.Sy 2. Clearing FIB Data
+.Pp
+Clear the routing tables of FIB 1 and FIB 2:
+.Dl fibmgr clear 1,2
+.Pp
+Clear the routing tables of FIB 1, 2, and 3 (space-separated):
+.Dl fibmgr clear 1 2 3
+.Pp
+Clear specified multiple FIBs using mixed formatting:
+.Dl fibmgr clear 1,2 3
+.Pp
+Clear all FIBs in the system:
+.Dl fibmgr clear all
+.Pp
+Clear only the IPv6 routing data across all FIBs:
+.Dl fibmgr -6 clear all
+.Sh COMPATIBILITY
+Compiling the source code of this project requires
+.Fx
+14.2 or higher.
+The source code will fail to compile successfully on any system versions prior to 14.2.

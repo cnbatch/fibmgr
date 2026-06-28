@@ -1,0 +1,142 @@
+.\" BSD 2-Clause License
+.\" 
+.\" Copyright (c) 2024, cnbatch
+.\" 
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions are met:
+.\" 
+.\" 1. Redistributions of source code must retain the above copyright notice, this
+.\"    list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright notice,
+.\"    this list of conditions and the following disclaimer in the documentation
+.\"    and/or other materials provided with the distribution.
+.\" 
+.\" THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+.\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+.\" DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+.\" FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+.\" SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+.\" CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+.\" OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+.\" OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+.\"
+.Dd June 28, 2026
+.Dt FIBMGR 8
+.Os
+.Sh NAME
+.Nm fibmgr
+.Nd 用于管理 FreeBSD FIB (Forwarding Information Base, 转发信息库/路由表) 的简易工具
+.Sh SYNOPSIS
+.Nm
+.Op Fl 4 \&| Fl 6
+.Cm copy
+.Ar source_fib
+.Cm to
+.Ar target_fib
+.Op Ar target_fib ...
+.No \&| Cm all
+.Pp
+.Nm
+.Op Fl 4 \&| Fl 6
+.Cm clear
+.Ar target_fib
+.Op Ar target_fib ...
+.No \&| Cm all
+.Sh DESCRIPTION
+.Nm
+是一个用于简化
+.Fx
+系统中 FIB (Forwarding Information Base) 管理的轻量级命令行工具。
+系统管理员可以使用该工具快速地将某个 FIB 的路由规则复制到其他多个 FIB 中，或者批量清空指定 FIB 的路由数据。
+.Pp
+该工具支持灵活的参数传递方式，允许使用逗号分隔或空格分隔的方式指定多个目标 FIB，同时支持特定的
+.Cm all
+关键字进行全局操作。
+.Sh OPTIONS
+以下是
+.Nm
+支持的全局选项：
+.Bl -tag -width indent
+.It Fl 4
+仅对 IPv4 路由表生效。
+.It Fl 6
+仅对 IPv6 路由表生效。
+.El
+.Pp
+若未指定此参数，则同时处理IPv4及IPv6路由表。
+.Sh COMMANDS
+.Bl -tag -width indent
+.It Cm copy
+将源 FIB
+.Pq Ar source_fib
+的路由信息复制到一个或多个目标 FIB
+.Pq Ar target_fib
+中。
+.Pp
+.Sy 语法 Ns :
+.Cm copy
+.Ar source_fib
+.Cm to
+.Ar target_fib1 Ns Oo , Ns Ar target_fib2 ... Oc
+.Pp
+.Sy 参数 Cm all Ns :
+当目标 FIB 指定为
+.Cm all
+时，工具会将源路由表复制到系统中所有可用的 FIB。
+.It Cm clear
+清空一个或多个目标 FIB
+.Pq Ar target_fib
+的路由信息。
+.Pp
+.Sy 语法 Ns :
+.Cm clear
+.Ar target_fib1 Ns Oo , Ns Ar target_fib2 ... Oc
+.Pp
+.Sy 参数 Cm all Ns :
+当目标 FIB 指定为
+.Cm all
+时，工具会清空系统中所有的 FIB（请谨慎使用）。
+.El
+.Sh EXAMPLES
+以下是一些常见的使用场景和示例：
+.Pp
+.Sy 1. 复制 FIB 数据
+.Pp
+从 FIB 0 复制路由表到 FIB 1 和 FIB 2（使用逗号分隔）：
+.Dl fibmgr copy 0 to 1,2
+.Pp
+从 FIB 0 复制路由表到 FIB 1, 2, 3（使用空格分隔）：
+.Dl fibmgr copy 0 to 1 2 3
+.Pp
+混合使用逗号和空格分隔多个目标 FIB：
+.Dl fibmgr copy 0 to 1,2 3
+.Pp
+将 FIB 0 的路由表复制到所有可用的 FIB：
+.Dl fibmgr copy 0 to all
+.Pp
+仅将 FIB 0 的 IPv4 路由表复制到所有 FIB：
+.Dl fibmgr -4 copy 0 to all
+.Pp
+.Sy 2. 清理 FIB 数据
+.Pp
+清空 FIB 1 和 FIB 2 的路由表：
+.Dl fibmgr clear 1,2
+.Pp
+清空 FIB 1, 2, 3 的路由表（使用空格分隔）：
+.Dl fibmgr clear 1 2 3
+.Pp
+混合格式清空指定的多个 FIB：
+.Dl fibmgr clear 1,2 3
+.Pp
+清空系统中所有的 FIB：
+.Dl fibmgr clear all
+.Pp
+仅清空所有 FIB 的 IPv6 路由数据：
+.Dl fibmgr -6 clear all
+.Sh COMPATIBILITY
+本项目源码编译需要
+.Fx
+14.2 或更高版本。
+在低于 14.2 的系统版本上，源码无法成功编译。
